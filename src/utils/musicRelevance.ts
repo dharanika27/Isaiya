@@ -8,101 +8,132 @@ export function isSuitableDuration(durationSeconds: number | null): boolean {
   return durationSeconds >= MIN_MUSIC_DURATION_SECONDS && durationSeconds <= MAX_MUSIC_DURATION_SECONDS;
 }
 
-const POSITIVE_KEYWORDS = ['song', 'video song', 'music', 'audio', 'lyrical', 'lyrics', 'official', 'jukebox'];
+/** Only a result scoring at or above this is confident enough to be "a song".
+ * Calibrated against ~150 real YouTube results (see PR discussion): at this
+ * threshold, every Angular/Python tutorial in a live test was excluded while
+ * genuine songs (including bare-title official uploads) still passed. */
+export const MUSIC_RELEVANCE_THRESHOLD = 2;
+
+const MUSIC_CATEGORY_ID = '10';
+
+/** Categories that are structurally never music. Deliberately excludes
+ * Entertainment (24) and People & Blogs (22): live testing showed real
+ * official film-song uploads and lyric/dance-cover videos routinely get
+ * tagged under those two, so treating them as negative would reject
+ * legitimate songs. */
+const NEGATIVE_CATEGORY_IDS = new Set(['15', '17', '19', '20', '25', '26', '27', '28']);
+
+const TITLE_POSITIVE_KEYWORDS = ['song', 'video song', 'music', 'audio', 'lyrical', 'lyrics', 'lyric', 'official', 'jukebox'];
+
+/** Reliable, structural channel signals rather than a content blocklist:
+ * "- Topic" is a suffix YouTube itself auto-generates only for channels
+ * backing legitimate rights-holder music releases (never for tutorials). */
+const CHANNEL_POSITIVE_PATTERNS = ['vevo', 'music', 'records', 'sound', 'saregama', 'entertainment'];
 
 /**
- * Strong signals that a result is definitely not a standalone song, even if
- * a positive keyword also happens to appear in the title (e.g. an "audio
- * launch event" or a coding "song" joke video). These always exclude.
- *
- * Deliberately does NOT include "movie" — Indian song titles routinely
- * reference the film they're from (e.g. "<Movie> Video Song"), and that's a
- * legitimate naming style, not a signal the result is a trailer or clip.
+ * Compact, concept-level negative signal list — one entry per non-music
+ * category the user named (tutorials, courses, lessons, coding/programming,
+ * interviews, podcasts, reviews, reactions, gaming, news, travel/tourism,
+ * vlogs, documentaries, lectures, explanations), plus a handful of terms
+ * empirically observed (live-tested) to be near-universal in tutorial titles
+ * ("learn"/"learning", "beginner(s)", "roadmap"). This is a small, named,
+ * traceable list — not a sprawling blocklist — and it is only ever used as
+ * one signal among several in a combined score, never as a standalone gate.
  */
-const HARD_NEGATIVE_KEYWORDS = [
-  // film/promo content
-  'trailer',
-  'teaser',
-  'episode',
-  'episodes',
-  'interview',
-  'review',
-  'reviews',
-  'web series',
-  'promo',
-  'making of',
-  'behind the scenes',
-  'live match',
-  'press meet',
-  'reaction',
-  'troll',
-  'highlights',
-  'spoof',
-  'shorts',
-  // tech/education/talk content (e.g. a plain "Angular" search should not surface these)
+const NEGATIVE_SIGNALS = [
   'tutorial',
   'tutorials',
   'course',
   'courses',
   'crash course',
   'full course',
-  'masterclass',
-  'bootcamp',
-  'lecture',
   'lesson',
   'lessons',
-  'class',
-  'classes',
-  'training',
-  'workshop',
-  'webinar',
+  'lecture',
+  'lectures',
   'programming',
   'coding',
   'developer',
   'framework',
-  'tech',
-  'technology',
-  'explained',
-  'how to',
-  'tips and tricks',
+  'interview',
+  'interviews',
   'podcast',
   'podcasts',
-  'documentary',
-  'vlog',
-  'unboxing',
+  'review',
+  'reviews',
+  'reaction',
+  'reactions',
+  'gaming',
   'gameplay',
   'walkthrough',
-  // compilation/playlist-style single uploads (true YouTube playlists are
-  // already excluded upstream via the search API's type=video parameter)
+  'news',
+  'travel',
+  'tourism',
+  'vlog',
+  'vlogs',
+  'documentary',
+  'documentaries',
+  'explained',
+  'explanation',
+  'explanations',
+  'learn',
+  'learning',
+  'beginner',
+  'beginners',
+  'roadmap',
+  'webinar',
+  'workshop',
+  'training',
+  'class',
+  'classes',
+  'masterclass',
+  'bootcamp',
+  'how to',
   'playlist',
-  'playlists',
   'compilation',
 ];
 
-function containsPhrase(title: string, phrase: string): boolean {
+function containsPhrase(text: string, phrase: string): boolean {
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\b${escaped}\\b`, 'i').test(title);
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(text);
 }
 
-function hasAnyKeyword(title: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => containsPhrase(title, keyword));
+function hasAny(text: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => containsPhrase(text, phrase));
+}
+
+export interface MusicRelevanceInput {
+  title: string;
+  description: string;
+  channelTitle: string;
+  categoryId: string | null;
+  liveBroadcastContent: string;
 }
 
 /**
- * Strict rule-based music relevance filter: a result must clearly look like
- * an individual song/music/audio/lyrical/video-song upload to pass. A hard
- * negative signal (tutorial, course, tech, podcast, trailer, playlist, ...)
- * always excludes, even over a coincidental positive match. Otherwise, a
- * positive music keyword is required — an unrelated query (e.g. "Angular")
- * with no music signal at all is excluded rather than kept by default.
+ * Combined music-relevance score: category metadata + title/description/
+ * channel positive and negative signals + live-broadcast status. Higher is
+ * more confident. Callers should keep only results at or above
+ * MUSIC_RELEVANCE_THRESHOLD, and may sort by this score to rank the most
+ * confident matches first among those.
  */
-export function isLikelyMusic(title: string): boolean {
-  if (hasAnyKeyword(title, HARD_NEGATIVE_KEYWORDS)) return false;
-  return hasAnyKeyword(title, POSITIVE_KEYWORDS);
-}
+export function computeMusicRelevance(input: MusicRelevanceInput): number {
+  const { title, description, channelTitle, categoryId, liveBroadcastContent } = input;
+  let score = 0;
 
-/** Number of positive music keywords matched, used to rank stronger music
- * signals first among results that already passed isLikelyMusic. */
-export function musicRelevanceScore(title: string): number {
-  return POSITIVE_KEYWORDS.reduce((score, keyword) => (containsPhrase(title, keyword) ? score + 1 : score), 0);
+  if (categoryId === MUSIC_CATEGORY_ID) score += 3;
+  if (categoryId !== null && NEGATIVE_CATEGORY_IDS.has(categoryId)) score -= 6;
+
+  if (channelTitle.trim().toLowerCase().endsWith('- topic')) score += 4;
+  if (hasAny(channelTitle, CHANNEL_POSITIVE_PATTERNS)) score += 2;
+  if (hasAny(channelTitle, NEGATIVE_SIGNALS)) score -= 5;
+
+  if (hasAny(title, TITLE_POSITIVE_KEYWORDS)) score += 2;
+  if (hasAny(title, NEGATIVE_SIGNALS)) score -= 6;
+
+  if (hasAny(description, NEGATIVE_SIGNALS)) score -= 3;
+
+  if (liveBroadcastContent !== 'none') score -= 5;
+
+  return score;
 }

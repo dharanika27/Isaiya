@@ -30,6 +30,9 @@ yarn-error.*
 .DS_Store
 *.pem
 
+# IDE (not using Android Studio / IntelliJ for this project)
+.idea/
+
 # local env files (never commit API keys)
 .env
 .env*.local

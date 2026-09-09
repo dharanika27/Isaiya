@@ -49,7 +49,7 @@ export function SearchScreen() {
       {state.status === 'empty' && (
         <View style={styles.centered}>
           <Text style={[typography.body, styles.hintText, { color: colors.onSurfaceMuted }]}>
-            No songs found.{'\n'}Try another search.
+            No music found. Try a different search.
           </Text>
         </View>
       )}

@@ -2,8 +2,8 @@ import { YOUTUBE_API_KEY } from '../../config/env';
 import type { Language } from '../../domain/language';
 import type { SearchResult } from '../../domain/searchResult';
 import { normalizeTitle } from '../../utils/text';
-import { isLikelyMusic, isSuitableDuration, musicRelevanceScore } from '../../utils/musicRelevance';
-import { fetchVideoDurations, searchVideos, YouTubeApiError } from '../remote/youtubeApi';
+import { computeMusicRelevance, isSuitableDuration, MUSIC_RELEVANCE_THRESHOLD } from '../../utils/musicRelevance';
+import { fetchVideoMetadata, searchVideos, YouTubeApiError, type RawSearchItem } from '../remote/youtubeApi';
 
 const MAX_CACHE_ENTRIES = 20;
 const resultCache = new Map<string, SearchResult[]>();
@@ -16,7 +16,12 @@ function cacheKey(query: string, language: Language): string {
   return `${language.code}:${query.trim().toLowerCase()}`;
 }
 
-function dedupeByVideoId(items: SearchResult[]): SearchResult[] {
+interface ScoredCandidate extends RawSearchItem {
+  durationSeconds: number | null;
+  score: number;
+}
+
+function dedupeByVideoId<T extends { videoId: string }>(items: T[]): T[] {
   const seen = new Set<string>();
   return items.filter((item) => {
     if (seen.has(item.videoId)) return false;
@@ -27,7 +32,7 @@ function dedupeByVideoId(items: SearchResult[]): SearchResult[] {
 
 /** Beyond exact videoId matches, collapses different uploads of the same
  * song (official video / lyric video / audio-only, etc.) to one result. */
-function dedupeByNormalizedTitle(items: SearchResult[]): SearchResult[] {
+function dedupeByNormalizedTitle<T extends { title: string }>(items: T[]): T[] {
   const seen = new Set<string>();
   return items.filter((item) => {
     const key = normalizeTitle(item.title);
@@ -39,10 +44,18 @@ function dedupeByNormalizedTitle(items: SearchResult[]): SearchResult[] {
 }
 
 /**
- * YouTube API -> raw results -> duration filter -> music relevance filter ->
- * duplicate removal -> ISAIYA search results. Language priority comes from
- * the query itself (buildQuery appends the language's search keyword), so
- * results are already language-biased before any of these filters run.
+ * ISAIYA is a music search engine, not a general YouTube search: this
+ * pipeline is YouTube API -> raw results -> duration filter (60s-15min) ->
+ * music relevance scoring (category + title/description/channel signals,
+ * see musicRelevance.ts) -> strict confidence threshold (results below it
+ * are dropped entirely, not just ranked lower) -> duplicate removal -> final
+ * results, ranked by confidence. videoCategoryId=10 is deliberately NOT used
+ * as a query-time restriction (live testing showed it neither reliably
+ * excludes mistagged tutorials nor reliably includes mistagged songs) — it's
+ * only one input to the relevance score, computed per-result. Language
+ * priority comes from the query itself (buildQuery appends the language's
+ * search keyword). If nothing survives the threshold, this returns an empty
+ * array rather than backfilling with low-confidence results.
  */
 export async function searchSongs(
   query: string,
@@ -60,25 +73,45 @@ export async function searchSongs(
   const fullQuery = buildQuery(query, language);
   const rawResults = await searchVideos(fullQuery, YOUTUBE_API_KEY, signal);
 
-  let durations: Record<string, number> = {};
+  let metadata: Record<string, { durationSeconds: number | null; categoryId: string | null }> = {};
   try {
-    durations = await fetchVideoDurations(rawResults.map((item) => item.videoId), YOUTUBE_API_KEY, signal);
+    metadata = await fetchVideoMetadata(rawResults.map((item) => item.videoId), YOUTUBE_API_KEY, signal);
   } catch {
-    // Duration lookup is best-effort; the search itself still succeeds without it.
+    // Metadata lookup is best-effort; items just fall back to unknown duration/category below.
   }
 
-  const withDuration: SearchResult[] = rawResults.map((item) => ({
-    ...item,
-    durationSeconds: durations[item.videoId] ?? null,
+  const withMetadata = rawResults.map((item) => ({
+    item,
+    durationSeconds: metadata[item.videoId]?.durationSeconds ?? null,
+    categoryId: metadata[item.videoId]?.categoryId ?? null,
   }));
 
-  const durationFiltered = withDuration.filter((item) => isSuitableDuration(item.durationSeconds));
-  const musicFiltered = durationFiltered.filter((item) => isLikelyMusic(item.title));
-  const deduped = dedupeByNormalizedTitle(dedupeByVideoId(musicFiltered));
+  const durationFiltered = withMetadata.filter((entry) => isSuitableDuration(entry.durationSeconds));
 
-  // Stable sort: surface stronger music-keyword matches first without
-  // discarding weaker (but still valid) matches lower in the list.
-  const results = [...deduped].sort((a, b) => musicRelevanceScore(b.title) - musicRelevanceScore(a.title));
+  const scored: ScoredCandidate[] = durationFiltered.map((entry) => ({
+    ...entry.item,
+    durationSeconds: entry.durationSeconds,
+    score: computeMusicRelevance({
+      title: entry.item.title,
+      description: entry.item.description,
+      channelTitle: entry.item.channelTitle,
+      categoryId: entry.categoryId,
+      liveBroadcastContent: entry.item.liveBroadcastContent,
+    }),
+  }));
+
+  const confident = scored.filter((entry) => entry.score >= MUSIC_RELEVANCE_THRESHOLD);
+  confident.sort((a, b) => b.score - a.score);
+
+  const deduped = dedupeByNormalizedTitle(dedupeByVideoId(confident));
+
+  const results: SearchResult[] = deduped.map((entry) => ({
+    videoId: entry.videoId,
+    title: entry.title,
+    channelTitle: entry.channelTitle,
+    thumbnailUrl: entry.thumbnailUrl,
+    durationSeconds: entry.durationSeconds,
+  }));
 
   resultCache.set(key, results);
   if (resultCache.size > MAX_CACHE_ENTRIES) {
