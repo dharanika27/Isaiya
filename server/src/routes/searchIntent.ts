@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getProvider } from '../agent/provider';
 import { TtlCache } from '../cache';
-import type { SearchIntent, SearchIntentRequest } from '../types';
+import { normalizeLanguage, type SearchIntent, type SearchIntentRequest } from '../types';
 
 const INTENT_CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = new TtlCache<SearchIntent>(INTENT_CACHE_TTL_MS);
@@ -21,7 +21,7 @@ searchIntentRouter.post('/api/search-intent', async (req, res) => {
     return;
   }
 
-  const language = typeof body.language === 'string' ? body.language : undefined;
+  const language = normalizeLanguage(body.language);
   const key = cacheKey(query, language);
   const cached = cache.get(key);
   if (cached) {

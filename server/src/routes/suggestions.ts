@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getProvider } from '../agent/provider';
 import { TtlCache } from '../cache';
-import type { SuggestionsRequest } from '../types';
+import { normalizeLanguage, type SuggestionsRequest } from '../types';
 
 const SUGGESTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = new TtlCache<string[]>(SUGGESTIONS_CACHE_TTL_MS);
@@ -21,7 +21,7 @@ suggestionsRouter.post('/api/search-suggestions', async (req, res) => {
     return;
   }
 
-  const language = typeof body.language === 'string' ? body.language : undefined;
+  const language = normalizeLanguage(body.language);
   const key = cacheKey(prefix, language);
   const cached = cache.get(key);
   if (cached) {

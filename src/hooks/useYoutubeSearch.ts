@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { searchSongs } from '../data/repository/youtubeRepository';
+import { resolveSearchIntent } from '../data/repository/searchAgentRepository';
 import { YouTubeApiError } from '../data/remote/youtubeApi';
 import type { Language } from '../domain/language';
 import type { SearchResult } from '../domain/searchResult';
@@ -7,6 +8,9 @@ import type { SearchResult } from '../domain/searchResult';
 const DEBOUNCE_MS = 450;
 const TIMEOUT_MS = 10000;
 const MIN_QUERY_LENGTH = 2;
+/** Bounds worst-case YouTube API calls per search action. Only the first
+ * candidate is tried unless it comes back empty. */
+const MAX_QUERY_CANDIDATES = 2;
 
 export type SearchState =
   | { status: 'idle' }
@@ -53,7 +57,20 @@ export function useYoutubeSearch(query: string, language: Language, retryToken =
     const debounceId = setTimeout(async () => {
       setState({ status: 'loading' });
       try {
-        const results = await searchSongs(trimmed, language, controller.signal);
+        // The Search Agent only proposes which query strings to try; it
+        // never decides validity. On any agent failure this resolves to
+        // { searchQueries: [trimmed] }, i.e. identical to pre-agent
+        // behavior. The existing searchSongs pipeline (scoring, duration,
+        // language, dedup) is untouched and remains the source of truth.
+        const intent = await resolveSearchIntent(trimmed, language, controller.signal);
+        const candidates = intent.searchQueries.slice(0, MAX_QUERY_CANDIDATES);
+
+        let results: SearchResult[] = [];
+        for (const candidate of candidates) {
+          results = await searchSongs(candidate, language, controller.signal);
+          if (results.length > 0) break;
+        }
+
         setState(results.length > 0 ? { status: 'success', results } : { status: 'empty' });
       } catch (error) {
         if (controller.signal.aborted && !timedOut) return;

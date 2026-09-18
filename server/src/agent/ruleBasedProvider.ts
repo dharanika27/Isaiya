@@ -57,7 +57,7 @@ function buildFallbackIntent(query: string): SearchIntent {
 export class RuleBasedProvider implements LlmProvider {
   readonly name = 'rule-based';
 
-  async resolveIntent(query: string, language?: string): Promise<SearchIntent> {
+  async resolveIntent(query: string, language?: SearchIntent['language']): Promise<SearchIntent> {
     const trimmed = query.trim();
     if (!trimmed) return buildFallbackIntent(trimmed);
 
@@ -68,7 +68,7 @@ export class RuleBasedProvider implements LlmProvider {
         query: trimmed,
         intent: 'song',
         artist: song.artist,
-        language: (language as SearchIntent['language']) ?? song.language,
+        language: language ?? song.language,
         searchQueries: [`${song.title} song`, `${song.title} ${song.artist} official`],
       };
     }
@@ -83,7 +83,7 @@ export class RuleBasedProvider implements LlmProvider {
           query: trimmed,
           intent: 'artist',
           artist: artist.name,
-          language: (language as SearchIntent['language']) ?? artist.language,
+          language: language ?? artist.language,
           era,
           searchQueries: [`${eraPrefix}${artist.shortName} songs`, `${artist.shortName} ${artist.language} songs`],
         };
@@ -93,7 +93,7 @@ export class RuleBasedProvider implements LlmProvider {
     return buildFallbackIntent(trimmed);
   }
 
-  async suggest(prefix: string, language?: string): Promise<string[]> {
+  async suggest(prefix: string, language?: SearchIntent['language']): Promise<string[]> {
     const p = normalize(prefix);
     if (p.length < 2) return [];
 

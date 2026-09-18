@@ -38,3 +38,13 @@ export interface SuggestionsRequest {
 export interface SuggestionsResponse {
   suggestions: string[];
 }
+
+const VALID_LANGUAGES: NonNullable<SearchIntent['language']>[] = ['Tamil', 'Telugu', 'Malayalam'];
+
+/** Guards against any mis-cased or unexpected `language` value reaching the
+ * provider (e.g. a client sending "TAMIL" instead of "Tamil") rather than
+ * silently forwarding it into the response. */
+export function normalizeLanguage(value: unknown): SearchIntent['language'] {
+  if (typeof value !== 'string') return undefined;
+  return VALID_LANGUAGES.find((v) => v.toLowerCase() === value.trim().toLowerCase());
+}
